@@ -60,6 +60,9 @@ GPP_max <- dfJ[, .(gppmax = max(gpp, na.rm = TRUE)), by = y]
 dfJ <- merge(dfJ, GPP_max, by = "y")
 dfJ[, in_gs := gpp > 0.1 * gppmax]
 
+dfGS <- dfJ[, .(y, m, d, doy, in_gs)]
+# fwrite(dfGS, "data/df_inGS.csv")
+
 dfY <- dfJ[in_gs == TRUE, .(
   e       = sum(e, na.rm = TRUE),
   etp     = sum(etp, na.rm = TRUE),
