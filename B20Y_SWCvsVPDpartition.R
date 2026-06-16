@@ -4,10 +4,12 @@ df <- fread("data/B20Y_BM_all.csv")
 
 # To long format
 SWC_cols <- names(df)[grep("SWC", names(df))]
+df <- df[rowSums(!is.na(df[, ..SWC_cols])) > 0] # Removing rows for which all SWC is NA (2005-2011 and more)
 df <- df[, c("TIMESTAMP", SWC_cols), with = FALSE]
 df <- melt(df, id.vars = "TIMESTAMP", variable.name = "sensor", value.name = "swc")
 rm(SWC_cols)
 
+# Date formatting
 df[, y := substring(TIMESTAMP, 1 , 4)]
 df[, m := substring(TIMESTAMP, 6 , 7)]
 df[, d := substring(TIMESTAMP, 9 , 10)]
@@ -17,14 +19,17 @@ date_lookup[, doy := yday(as.Date(paste(y, m, d, sep = "-")))]
 df <- merge(df, date_lookup, by = c("y", "m", "d"))
 rm(date_lookup)
 
+# Sensor information in column name
 df[, sensor := as.character(sensor)]
 df[, h_pos  := as.integer(sub("SWC_([0-9]+)_([0-9]+)_1", "\\1", sensor))]
 df[, v_dep  := as.integer(sub("SWC_([0-9]+)_([0-9]+)_1", "\\2", sensor))]
 
+# Depth information
 d0 <- c(0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.25, 1.35, 1.45)
 depth_map <- data.table(v_dep = 1:15, depth = d0)
 df <- merge(df, depth_map, by = "v_dep")
-rm(depth_map)
+rm(depth_map, d0)
+
 
 # Standardize by position
 pos_means <- df[, .(pos_mean = mean(swc, na.rm = TRUE)), by = .(h_pos, depth)]
@@ -32,28 +37,26 @@ df <- merge(df, pos_means, by = c("h_pos", "depth"))
 df[, swc_anom := swc - pos_mean]
 rm(pos_means)
 
-# Remove missing year
+# Remove top layer (often missing)
 df <- df[depth != 0.05]
 
-# Tracking how many positions contribute
+
+# Getting mean of positions
 dfST <- df[, .(
   swc_mean  = mean(swc_anom, na.rm = TRUE), # position-corrected mean
   swc_abs   = mean(swc, na.rm = TRUE),      # raw absolute value if needed
   n_pos     = sum(!is.na(swc))              # now this is number of positions (max 6)
 ), by = .(y, m, d, doy, h, depth)]
 
+
 # Add layer definition
 dfST[depth <= 0.25, layer := "shallow"]
 dfST[depth > 0.25 & depth <= 0.75, layer := "mid"]
 dfST[depth > 0.75, layer := "deep"]
-
-# every hour by full profile
-dfSTD <- dfST[, .(
-  swc_mean  = mean(swc_mean, na.rm = TRUE),  
-  swc_abs   = mean(swc_abs, na.rm = TRUE),        
-  n_depths  = sum(!is.na(swc_mean))  # how many depths contributed
-), by = .(y, m, d, doy, h)]
-
+dfSTf <- copy(dfST)
+dfSTf[, layer := "full"]
+dfST <- rbind(dfST, dfSTf)
+rm(dfSTf)
 
 # Layer means with coverage tracking
 dfSL <- dfST[, .(
@@ -64,153 +67,154 @@ dfSL <- dfST[, .(
 ), by = .(y, m, d, doy, h, layer)]
 
 
-# Daily data
+# Daily averages
 dfSJ <- dfST[, .(
   swc_mean  = mean(swc_mean, na.rm = TRUE),  
   swc_abs   = mean(swc_abs, na.rm = TRUE),        
   n_hours    = sum(!is.na(swc_mean))        # valid half-hours in the day
 ), by = .(y, m, d, doy, layer)]
+dfSJ[, y := as.numeric(y)]
 
-min_hours <- 24   # at least 24 out of 48 half-hours
+min_hours <- 24   # at least 24 out of 48 half-hours otherwise day removed
 dfSJ[n_hours < min_hours, swc_mean := NA]
 dfSJ[n_hours < min_hours, swc_abs  := NA]
+rm(min_hours)
 
-dfSD <- dfSJ[, .(
-  swc_mean  = mean(swc_mean, na.rm = TRUE),  
-  swc_abs   = mean(swc_abs, na.rm = TRUE),        
-  n_depths  = sum(!is.na(swc_mean))  # how many depths contributed
-), by = .(y, m, d, doy)]
-
+# Calculate REW
 rew_params <- dfST[, .(
   FC = quantile(swc_abs, 0.95, na.rm = TRUE),
   WP = quantile(swc_abs, 0.05, na.rm = TRUE)
 ), by = layer]
 
 dfSJ <- merge(dfSJ, rew_params, by = "layer")
-dfSD[, FC := quantile(dfSTD$swc_abs, 0.95, na.rm = TRUE)]
-dfSD[, WP := quantile(dfSTD$swc_abs, 0.05, na.rm = TRUE)]
-
 dfSJ[, REW := (swc_abs - WP) / (FC - WP)]
-dfSD[, REW := (swc_abs - WP) / (FC - WP)]
 dfSJ[REW < 0, REW := 0] ; dfSJ[REW > 1, REW := 1]
-dfSD[REW < 0, REW := 0] ; dfSD[REW > 1, REW := 1]
+rm(rew_params)
 
-# Get growing season data
+# Subset for the growing season
 dfGS <- fread("data/df_inGS.csv")
-dfGS[, y := as.character(y)]
-dfGS[, m := as.character(m)]
-dfGS[, d := as.character(d)]
+dfGS[, m := ifelse(m < 10, paste0("0", as.character(m)), as.character(m))]
+dfGS[, d := ifelse(d < 10, paste0("0", as.character(d)), as.character(d))]
 dfSJ <- merge(dfSJ, dfGS, by = c("y", "m", "d", "doy"), all.x = T)
-dfSD <- merge(dfSD, dfGS, by = c("y", "m", "d", "doy"), all.x = T)
+rm(dfGS)
 
-dfSLY <- dfSJ[in_gs == TRUE & !is.na(swc_mean), .(
+# Yearly average
+dfSY <- dfSJ[in_gs == TRUE & !is.na(swc_mean), .(
   swc_mean = mean(swc_mean, na.rm = TRUE),
   swc_abs  = mean(swc_abs,  na.rm = TRUE),
   rew_mean  = mean(REW,  na.rm = TRUE),
   n_days   = sum(!is.na(swc_mean))
 ), by = .(y, layer)]
 
-dfSY <- dfSJ[in_gs == TRUE & !is.na(swc_mean), .(
-  swc_mean = mean(swc_mean, na.rm = TRUE),
-  swc_abs  = mean(swc_abs,  na.rm = TRUE),
-  rew_mean  = mean(REW,  na.rm = TRUE),
-  n_days   = sum(!is.na(swc_mean))
-), by = .(y)]
+
+# Computing number of stress days & drought intensity
+stress_threshold <- 0.3
+
+stress_days <- dfSJ[in_gs == TRUE, .(
+  n_valid    = sum(!is.na(REW)),
+  pct_stress = round(mean(REW < stress_threshold, na.rm = TRUE) * 100, 1)
+), by = .(y, layer)]
+
+dfSJ[, deficit := pmax(stress_threshold - REW, 0)]
+drought_intensity <- dfSJ[in_gs == TRUE, .(
+  n_valid      = sum(!is.na(deficit)),
+  mean_deficit = mean(deficit, na.rm = TRUE)
+), by = .(y, layer)]
 
 
-dfSLY[, y := as.numeric(y)]
-dfSY[, y := as.numeric(y)]
+# Plots for yearly trends -------------------------------------------------------------------------
 
-mSS <- lm(swc_mean ~ y, dfSLY[layer == "shallow"]) ; summary(mSS)
-mSM <- lm(swc_mean ~ y, dfSLY[layer == "mid"]) ; summary(mSM)
-mSD <- lm(swc_mean ~ y, dfSLY[layer == "deep"]) ; summary(mSD)
-mSA <- lm(swc_mean ~ y, dfSY) ; summary(mSA)
-mSSa <- lm(swc_abs ~ y, dfSLY[layer == "shallow"]) ; summary(mSSa)
-mSMa <- lm(swc_abs ~ y, dfSLY[layer == "mid"]) ; summary(mSMa)
-mSDa <- lm(swc_abs ~ y, dfSLY[layer == "deep"]) ; summary(mSDa)
-mSAa <- lm(swc_abs ~ y, dfSY) ; summary(mSAa)
-mRS <- lm(rew_mean ~ y, dfSLY[layer == "shallow"]) ; summary(mRS)
-mRM <- lm(rew_mean ~ y, dfSLY[layer == "mid"]) ; summary(mRM)
-mRD <- lm(rew_mean ~ y, dfSLY[layer == "deep"]) ; summary(mRD)
-mRA <- lm(rew_mean ~ y, dfSY) ; summary(mRA)
-
-plot(swc_mean ~ y, dfSLY[layer == "shallow"]) ; abline(a = coef(mSS)[1], b = coef(mSS)[2], col = "red")
-plot(swc_mean ~ y, dfSLY[layer == "mid"]) ; abline(a = coef(mSM)[1], b = coef(mSM)[2], col = "red")
-plot(swc_mean ~ y, dfSLY[layer == "deep"]) ; abline(a = coef(mSD)[1], b = coef(mSD)[2], col = "red")
-plot(swc_mean ~ y, dfSY) ; abline(a = coef(mSA)[1], b = coef(mSA)[2], col = "red")
-
-plot(swc_abs ~ y, dfSLY[layer == "shallow"]) ; abline(a = coef(mSSa)[1], b = coef(mSSa)[2], col = "red")
-plot(swc_abs ~ y, dfSLY[layer == "mid"]) ; abline(a = coef(mSMa)[1], b = coef(mSMa)[2], col = "red")
-plot(swc_abs ~ y, dfSLY[layer == "deep"]) ; abline(a = coef(mSDa)[1], b = coef(mSDa)[2], col = "red")
-plot(swc_abs ~ y, dfSY) ; abline(a = coef(mSAa)[1], b = coef(mSAa)[2], col = "red")
-
-plot(rew_mean ~ y, dfSLY[layer == "shallow"]) ; abline(a = coef(mRS)[1], b = coef(mRS)[2], col = "red")
-plot(rew_mean ~ y, dfSLY[layer == "mid"]) ; abline(a = coef(mRM)[1], b = coef(mRM)[2], col = "red")
-plot(rew_mean ~ y, dfSLY[layer == "deep"]) ; abline(a = coef(mRD)[1], b = coef(mRD)[2], col = "red")
-plot(rew_mean ~ y, dfSY) ; abline(a = coef(mRA)[1], b = coef(mRA)[2], col = "red")
-
-
-
-
-
-
-
-
-
-#       
-#       
-# # -------------------------------------------------------------------------
+# mSS <- lm(swc_mean ~ y, dfSY[layer == "shallow"]) ; summary(mSS)
+# mSM <- lm(swc_mean ~ y, dfSY[layer == "mid"]) ; summary(mSM)
+# mSD <- lm(swc_mean ~ y, dfSY[layer == "deep"]) ; summary(mSD)
+# mSF <- lm(swc_mean ~ y, dfSY[layer == "full"]) ; summary(mSF)
 # 
-# # Define layers
-# d1 <- c(0.05, 0.15, 0.25)                             # V = 1,2,3
-# d2 <- c(0.35, 0.45, 0.55, 0.65, 0.75)                 # V = 4,5,6,7,8
-# d3 <- c(0.85, 0.95, 1.05, 1.15, 1.25, 1.35, 1.45)     # V = 9-15
-# d0 <- c(0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.25, 1.35, 1.45)
-# pos <- 1:6  # which horizontal positions to use
+# mSSa <- lm(swc_abs ~ y, dfSY[layer == "shallow"]) ; summary(mSSa)
+# mSMa <- lm(swc_abs ~ y, dfSY[layer == "mid"]) ; summary(mSMa)
+# mSDa <- lm(swc_abs ~ y, dfSY[layer == "deep"]) ; summary(mSDa)
+# mSFa <- lm(swc_abs ~ y, dfSY[layer == "full"]) ; summary(mSFa)
 # 
-# # Get layer columns
-# get_swc_cols <- function(h_pos, depth_vec, all_depths = d0) {
-#   v_idx <- which(all_depths %in% depth_vec)
-#   as.vector(outer(h_pos, v_idx, function(h, v) paste0("SWC_", h, "_", v, "_1")))
-# }
+# mRS <- lm(rew_mean ~ y, dfSY[layer == "shallow"]) ; summary(mRS)
+# mRM <- lm(rew_mean ~ y, dfSY[layer == "mid"]) ; summary(mRM)
+# mRD <- lm(rew_mean ~ y, dfSY[layer == "deep"]) ; summary(mRD)
+# mRF <- lm(rew_mean ~ y, dfSY[layer == "full"]) ; summary(mRF)
 # 
-# cols0 <- get_swc_cols(pos, d0)  # full profile
-# cols1 <- get_swc_cols(pos, d1)  # Shallow
-# cols2 <- get_swc_cols(pos, d2)  # Mid
-# cols3 <- get_swc_cols(pos, d3)  # Deep
+# mPS <- lm(pct_stress ~ y, stress_days[layer == "shallow"]) ; summary(mPS)
+# mPM <- lm(pct_stress ~ y, stress_days[layer == "mid"]) ; summary(mPM)
+# mPD <- lm(pct_stress ~ y, stress_days[layer == "deep"]) ; summary(mPD)
+# mPF <- lm(pct_stress ~ y, stress_days[layer == "full"]) ; summary(mPF)
 # 
-# # Verify columns exist in df
-# cols1 <- intersect(cols1, names(df))
-# cols2 <- intersect(cols2, names(df))
-# cols3 <- intersect(cols3, names(df))
-# cols0 <- intersect(cols0, names(df))
+# mDS <- lm(mean_deficit ~ y, drought_intensity[layer == "shallow"]) ; summary(mDS)
+# mDM <- lm(mean_deficit ~ y, drought_intensity[layer == "mid"]) ; summary(mDM)
+# mDD <- lm(mean_deficit ~ y, drought_intensity[layer == "deep"]) ; summary(mDD)
+# mDF <- lm(mean_deficit ~ y, drought_intensity[layer == "full"]) ; summary(mDF)
 # 
-# # cat("Shallow:", length(cols1), "columns\n")
-# # cat("Mid:",     length(cols2),     "columns\n")
-# # cat("Deep:",    length(cols3),    "columns\n")
-# # cat("Full profile:", length(cols0), "columns\n")
+# png("figs/B20Y_annualSWC.png", height = 10000, width = 12000, res = 900)
+# par(mfrow = c(2,2), bty = "L", mar = c(5,4,1,1), oma = c(0,1,0,0))
 # 
-# # Compute layer means
-# df[, SWC1 := rowMeans(.SD, na.rm = TRUE), .SDcols = cols1]
-# df[, SWC2 := rowMeans(.SD, na.rm = TRUE), .SDcols = cols2]
-# df[, SWC3 := rowMeans(.SD, na.rm = TRUE), .SDcols = cols3]
-# df[, SWC0 := rowMeans(.SD, na.rm = TRUE), .SDcols = cols0]
+# plot(-500, xlim = c(2011,2024), ylim = c(0,0.5), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(swc_abs ~ y, dfSY[layer == "full"], col = "#3B1F2B", type = "l", lwd = 2)
+# points(swc_abs ~ y, dfSY[layer == "deep"], col = "#E15554", type = "l", lwd = 2)
+# points(swc_abs ~ y, dfSY[layer == "mid"], col = "#F6AE2D", type = "l", lwd = 2)
+# points(swc_abs ~ y, dfSY[layer == "shallow"], col = "#2E86AB", type = "l", lwd = 2)
+# points(swc_abs ~ y, dfSY[layer == "full"], pch = 21, bg = "#3B1F2B", type = "p", cex = 1.4)
+# points(swc_abs ~ y, dfSY[layer == "deep"], pch = 21, bg = "#E15554", type = "p", cex = 1.4)
+# points(swc_abs ~ y, dfSY[layer == "mid"], pch = 21, bg = "#F6AE2D", type = "p", cex = 1.4)
+# points(swc_abs ~ y, dfSY[layer == "shallow"], pch = 21, bg = "#2E86AB", type = "p", cex = 1.4)
+# axis(side = 1, font = 4)
+# axis(side = 2, font = 4, las = 2)
+# mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
+# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Soil water content (m"^"3", " m"^"-3", ")", sep = ""))))
+# # abline(a = coef(mSFa)[1], b = coef(mSFa)[2], col = "#3B1F2B", lwd = 1, lty = 3)
+# legend("bottomleft", bty = "n", legend = c("Full profile         [0.15-1.45]: p = 0.65", "Deep layers       [0.75-1.45]: p = 0.48", "Mid layers         [0.25-0.75]: p = 0.63", "Shallow layers [0.15-0.25]: p = 0.66"), fill = c("#3B1F2B", "#E15554", "#F6AE2D", "#2E86AB"), text.font = 4, cex = 1.2)
 # 
-# # -------------------------------------------------------------------------
+# plot(-500, xlim = c(2011,2024), ylim = c(0,1), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(rew_mean ~ y, dfSY[layer == "full"], col = "#3B1F2B", type = "l", lwd = 2)
+# points(rew_mean ~ y, dfSY[layer == "deep"], col = "#E15554", type = "l", lwd = 2)
+# points(rew_mean ~ y, dfSY[layer == "mid"], col = "#F6AE2D", type = "l", lwd = 2)
+# points(rew_mean ~ y, dfSY[layer == "shallow"], col = "#2E86AB", type = "l", lwd = 2)
+# points(rew_mean ~ y, dfSY[layer == "full"], pch = 21, bg = "#3B1F2B", type = "p", cex = 1.4)
+# points(rew_mean ~ y, dfSY[layer == "deep"], pch = 21, bg = "#E15554", type = "p", cex = 1.4)
+# points(rew_mean ~ y, dfSY[layer == "mid"], pch = 21, bg = "#F6AE2D", type = "p", cex = 1.4)
+# points(rew_mean ~ y, dfSY[layer == "shallow"], pch = 21, bg = "#2E86AB", type = "p", cex = 1.4)
+# axis(side = 1, font = 4)
+# axis(side = 2, font = 4, las = 2)
+# mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
+# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Relative extractable water (%)", sep = ""))))
+# legend("bottomleft", bty = "n", legend = c("Full profile         [0.15-1.45]: p = 0.65", "Deep layers       [0.75-1.45]: p = 0.48", "Mid layers         [0.25-0.75]: p = 0.64", "Shallow layers [0.15-0.25]: p = 0.70"), fill = c("#3B1F2B", "#E15554", "#F6AE2D", "#2E86AB"), text.font = 4, cex = 1.2)
 # 
-# # Compare position 6 vs others where both are available
-# df[!is.na(SWC_6_1_1), .(
-#   mean_pos1_4 = mean(rowMeans(.SD[, get_swc_cols(1:4, d1) |> 
-#                                     intersect(names(df)), with = FALSE], na.rm = TRUE)),
-#   mean_pos6   = mean(rowMeans(.SD[, get_swc_cols(6, d1) |> 
-#                                     intersect(names(df)), with = FALSE], na.rm = TRUE))
-# )]
+# plot(-500, xlim = c(2011,2024), ylim = c(0,100), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(pct_stress ~ y, stress_days[layer == "full"], col = "#3B1F2B", type = "l", lwd = 2)
+# points(pct_stress ~ y, stress_days[layer == "deep"], col = "#E15554", type = "l", lwd = 2)
+# points(pct_stress ~ y, stress_days[layer == "mid"], col = "#F6AE2D", type = "l", lwd = 2)
+# points(pct_stress ~ y, stress_days[layer == "shallow"], col = "#2E86AB", type = "l", lwd = 2)
+# points(pct_stress ~ y, stress_days[layer == "full"], pch = 21, bg = "#3B1F2B", type = "p", cex = 1.4)
+# points(pct_stress ~ y, stress_days[layer == "deep"], pch = 21, bg = "#E15554", type = "p", cex = 1.4)
+# points(pct_stress ~ y, stress_days[layer == "mid"], pch = 21, bg = "#F6AE2D", type = "p", cex = 1.4)
+# points(pct_stress ~ y, stress_days[layer == "shallow"], pch = 21, bg = "#2E86AB", type = "p", cex = 1.4)
+# axis(side = 1, font = 4)
+# axis(side = 2, font = 4, las = 2)
+# mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
+# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("% days below threshold (REW < 0.3)", sep = ""))))
+# legend("topleft", bty = "n", legend = c("Full profile         [0.15-1.45]: p = 0.59", "Deep layers       [0.75-1.45]: p = 0.69", "Mid layers         [0.25-0.75]: p = 0.24", "Shallow layers [0.15-0.25]: p = 0.90"), fill = c("#3B1F2B", "#E15554", "#F6AE2D", "#2E86AB"), text.font = 4, cex = 1.2)
 # 
-# # Simpler version
-# pos1_4_mean <- df[, rowMeans(.SD, na.rm = TRUE), 
-#                   .SDcols = intersect(get_swc_cols(1:4, d0), names(df))]
-# pos6_mean   <- df[, rowMeans(.SD, na.rm = TRUE), 
-#                   .SDcols = intersect(get_swc_cols(6, d0), names(df))]
 # 
-# # Are they systematically different?
-# mean(pos6_mean - pos1_4_mean, na.rm = TRUE)
+# plot(-500, xlim = c(2011,2024), ylim = c(0,0.2), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(mean_deficit ~ y, drought_intensity[layer == "full"], col = "#3B1F2B", type = "l", lwd = 2)
+# points(mean_deficit ~ y, drought_intensity[layer == "deep"], col = "#E15554", type = "l", lwd = 2)
+# points(mean_deficit ~ y, drought_intensity[layer == "mid"], col = "#F6AE2D", type = "l", lwd = 2)
+# points(mean_deficit ~ y, drought_intensity[layer == "shallow"], col = "#2E86AB", type = "l", lwd = 2)
+# points(mean_deficit ~ y, drought_intensity[layer == "full"], pch = 21, bg = "#3B1F2B", type = "p", cex = 1.4)
+# points(mean_deficit ~ y, drought_intensity[layer == "deep"], pch = 21, bg = "#E15554", type = "p", cex = 1.4)
+# points(mean_deficit ~ y, drought_intensity[layer == "mid"], pch = 21, bg = "#F6AE2D", type = "p", cex = 1.4)
+# points(mean_deficit ~ y, drought_intensity[layer == "shallow"], pch = 21, bg = "#2E86AB", type = "p", cex = 1.4)
+# axis(side = 1, font = 4)
+# axis(side = 2, font = 4, las = 2)
+# mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
+# abline(a = coef(mDM)[1], b = coef(mDM)[2], col = "#F6AE2D", lwd = 1, lty = 3)
+# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Mean deficit below threshold (REW < 0.3)", sep = ""))))
+# legend("topleft", bty = "n", legend = c("Full profile         [0.15-1.45]: p = 0.38", "Deep layers       [0.75-1.45]: p = 0.54", "Mid layers         [0.25-0.75]: p = 0.06 .", "Shallow layers [0.15-0.25]: p = 0.60"), fill = c("#3B1F2B", "#E15554", "#F6AE2D", "#2E86AB"), text.font = 4, cex = 1.2)
+# 
+# dev.off()
+
+# Partition -------------------------------------------------------------------
