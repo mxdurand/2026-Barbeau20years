@@ -217,3 +217,9 @@ drought_intensity <- dfSJ[in_gs == TRUE, .(
 # 
 # dev.off()
 
+
+# Cleanup
+rm(stress_days, drought_intensity, stress_threshold)
+rm(df)
+
+
