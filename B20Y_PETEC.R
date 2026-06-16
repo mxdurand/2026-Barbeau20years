@@ -12,6 +12,10 @@ cpa     <- 1013        # specific heat of air (J/kg/K)
 eps     <- 0.622       # ratio molecular weight water/dry air
 
 # Conversions
+dfE[, gpp := gpp * 1800 * 12.01e-6] # (µmol m-2 s-1 -> gC m-2 per half-hour)
+dfE[, nee := nee * 1800 * 12.01e-6]
+dfE[, ter := ter * 1800 * 12.01e-6]
+
 dfE[, press := press / 10] # in kPa
 dfE[, del := 4098 * (0.6108 * exp(17.27 * ta / (ta + 237.3))) / (ta + 237.3)^2] # Slope of saturation vapour pressure curve (before conversion to celsius)
 dfE[, ta := ta + 273.15]   # in Kelvins
@@ -45,9 +49,11 @@ dfE[etpet < 0, etpet := NA]        # negative ET is not meaningful here
 # Aggregate to daily
 dfEJ <- dfE[, .(
   etpet   = mean(etpet, na.rm = TRUE),
-  gpp     = mean(gpp, na.rm = TRUE),
+  gpp     = sum(gpp, na.rm = TRUE),
   e       = sum(e, na.rm = TRUE),
   etp     = sum(ETP_mm, na.rm = TRUE),
+  ter     = sum(ter, na.rm = TRUE),
+  nee     = sum(nee, na.rm = TRUE),
   ta      = mean(ta - 273.15, na.rm = TRUE),
   vpd     = mean(vpd, na.rm = TRUE),
   rn      = sum(rn, na.rm = TRUE)
@@ -67,6 +73,8 @@ rm(dfGS, GPP_max)
 dfEY <- dfEJ[in_gs == TRUE, .(
   e       = sum(e, na.rm = TRUE),
   etp     = sum(etp, na.rm = TRUE),
+  ter     = sum(ter, na.rm = TRUE),
+  nee     = sum(nee, na.rm = TRUE),
   ta      = mean(ta, na.rm = TRUE),
   vpd     = mean(vpd, na.rm = TRUE),
   rn      = sum(rn, na.rm = TRUE)
@@ -80,38 +88,35 @@ dfEY[, etpet := e / etp]
 mE     <- lm(e ~ y, dfEY)
 mETP   <- lm(etp ~ y, dfEY)
 mETPET <- lm(etpet ~ y, dfEY)
-summary(mE)
-summary(mETP)
-summary(mETPET)
-rm(mE, mETP, mETPET)
+# summary(mE)
+# summary(mETP)
+# summary(mETPET)
 
-# Cleanup
-rm(cpa, eps, lam, rho)
 # -------------------------------------------------------------------------
 
 # png("figs/B20Y_annualETPET.png", height = 6000, width = 15000, res = 1000)
 # par(mfrow = c(1,3), bty = "L", mar = c(5,4,1,1), oma = c(0,1,0,0))
 # 
-# plot(-500, xlim = c(2004,2026), ylim = c(450,650), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
-# points(e ~ y, dfY, pch = 21, bg = "dodgerblue3", type = "p", cex = 1.4)
+# plot(-500, xlim = c(2004,2026), ylim = c(0,1200), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(e ~ y, dfEY, pch = 21, bg = "dodgerblue3", type = "p", cex = 1.4)
 # axis(side = 1, font = 4)
-# axis(side = 2, font = 4, las = 2)
+# axis(side = 2, font = 4, las = 2, labels = seq(0,120,20), at = seq(0,1200,200))
 # mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
-# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Actual evapotranspiration [ET] (mm year"^"-1", ")", sep = ""))))
+# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Actual evapotranspiration [ET] (cm year"^"-1", ")", sep = ""))))
 # abline(a = coef(mE)[1], b = coef(mE)[2], col = "dodgerblue1", lwd = 3, lty = 3)
 # legend("topleft", bty = "n", legend = c("p = 0.60 | R2 = 0"), text.font = 4, cex = 1.4)
 # 
-# plot(-500, xlim = c(2004,2026), ylim = c(650,1050), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
-# points(etp ~ y, dfY, pch = 21, bg = "dodgerblue3", type = "p", cex = 1.4)
+# plot(-500, xlim = c(2004,2026), ylim = c(0,1200), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(etp ~ y, dfEY, pch = 21, bg = "dodgerblue3", type = "p", cex = 1.4)
 # axis(side = 1, font = 4)
-# axis(side = 2, font = 4, las = 2)
+# axis(side = 2, font = 4, las = 2, labels = seq(0,120,20), at = seq(0,1200,200))
 # mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
-# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Potential evapotranspiration [PET] (mm year"^"-1", ")", sep = ""))))
+# mtext(side = 2, font = 4, line = 2.8, cex = 1.4, text = expression(bolditalic(paste("Potential evapotranspiration [PET] (cm year"^"-1", ")", sep = ""))))
 # abline(a = coef(mETP)[1], b = coef(mETP)[2], col = "dodgerblue1", lwd = 3, lty = 1)
 # legend("topleft", bty = "n", legend = c("p = 0.0009 | R2 = 0.41"), text.font = 4, cex = 1.4)
 # 
-# plot(-500, xlim = c(2004,2026), ylim = c(0.5,0.85), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
-# points(etpet ~ y, dfY, pch = 21, bg = "dodgerblue3", type = "p", cex = 1.4)
+# plot(-500, xlim = c(2004,2026), ylim = c(0,1), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
+# points(etpet ~ y, dfEY, pch = 21, bg = "dodgerblue3", type = "p", cex = 1.4)
 # axis(side = 1, font = 4)
 # axis(side = 2, font = 4, las = 2)
 # mtext(side = 1, font = 4, line = 2.5, cex = 1.4, text = "Years")
@@ -121,3 +126,6 @@ rm(cpa, eps, lam, rho)
 # 
 # dev.off()
 
+# Cleanup
+rm(cpa, eps, lam, rho)
+rm(mE, mETP, mETPET)
