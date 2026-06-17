@@ -142,7 +142,7 @@ getSignif <- function(p){
 }
 
 # Plot
-png("figs/B20Y_PartitionSWC_VPD_RN10_JJA_late.png", height = 5000, width = 15000, res = 1000)
+png("figs/B20Y_PartitionSWC_VPD_RN10_JJA.png", height = 5000, width = 15000, res = 1000)
 par(mfrow = c(1,3), bty = "L", mar = c(5,4,1,1), oma = c(0,1,0,0))
 
 plot(-500, xlim = c(0,2), ylim = c(0,18), xaxt = "n", yaxt = "n", xlab = "", ylab = "")
